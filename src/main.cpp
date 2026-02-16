@@ -1,44 +1,132 @@
 #include <Arduino.h>
-#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
+#include <WiFiManager.h>
 #include <WiFi.h>
 
-// Pin Definitions for ESP32-C3 Supermini
-#define LED_BUILTIN 8          // The onboard blue LED is on GPIO8
+// Pin Definitions
+#define LED_BUILTIN 8          // Onboard blue LED (inverted logic)
 #define EXTERNAL_LED 2         // External LED on GPIO2
 #define EXTERNAL_BUTTON 3      // External Button on GPIO3
-#define BUTTON_BOOT 9          // The onboard BOOT button is on GPIO9
-#define RESET_WIFI_BUTTON BUTTON_BOOT  // Use BOOT button to reset WiFi config
+#define BUTTON_BOOT 9          // Onboard BOOT button (used for WiFi reset)
+#define RESET_WIFI_BUTTON BUTTON_BOOT  // Use BOOT button to reset WiFi
 
-// WiFi Manager configuration
+// LED Blink Patterns
+#define CONNECTED_BLINK_INTERVAL 500      // 500ms when connected
+#define DISCONNECTED_BLINK_INTERVAL 250   // 250ms when disconnected
+#define RESET_BLINK_INTERVAL 100          // 100ms rapid blink during reset countdown
+
+// WiFi Manager
 WiFiManager wm;
-bool wifiConnected = false;
-unsigned long wifiReconnectAttempt = 0;
-unsigned long lastBlink = 0;
+unsigned long previousBlink = 0;
+bool ledState = LOW;
 int lastButtonState = HIGH;
+int lastExternalButtonState = HIGH;
+
+// Reset button variables
+unsigned long buttonPressTime = 0;
+bool buttonPressed = false;
+bool resetExecuted = false;  // New flag to prevent multiple resets
+int resetCountdown = 0;
 
 // Function to reset WiFi settings and restart
 void resetWiFiSettings() {
-  Serial.println("Resetting WiFi settings...");
+  Serial.println("\n⚠️  ===== RESETTING WIFI SETTINGS! ===== ⚠️");
+  Serial.println("Erasing saved WiFi credentials...");
+  
+  // Visual indication of reset
+  for(int i = 0; i < 5; i++) {
+    digitalWrite(LED_BUILTIN, LOW);  // ON
+    digitalWrite(EXTERNAL_LED, HIGH);
+    delay(150);
+    digitalWrite(LED_BUILTIN, HIGH); // OFF
+    digitalWrite(EXTERNAL_LED, LOW);
+    delay(150);
+  }
+  
+  // Reset WiFi settings
   wm.resetSettings();
-  delay(1000);
-  ESP.restart();
+  
+  Serial.println("✅ WiFi credentials erased!");
+  Serial.println("🔄 Restarting in AP mode for new configuration...");
+  delay(2000);
+  
+  ESP.restart();  // Restart ESP32
 }
 
-// WiFi status LED patterns
+// WiFi status LED control
 void updateStatusLED() {
-  static int ledState = LOW;
-  static unsigned long previousMillis = 0;
   unsigned long currentMillis = millis();
+  unsigned long blinkInterval;
   
-  if (WiFi.status() == WL_CONNECTED) {
-    // Solid ON when connected (with inverted logic for built-in LED)
-    digitalWrite(LED_BUILTIN, LOW);  // ON (inverted)
+  // Different blink patterns based on state
+  if (buttonPressed && (millis() - buttonPressTime < 5000)) {
+    // Rapid blinking during reset countdown
+    blinkInterval = RESET_BLINK_INTERVAL;
+  } else if (WiFi.status() == WL_CONNECTED) {
+    blinkInterval = CONNECTED_BLINK_INTERVAL;  // 500ms when connected
   } else {
-    // Fast blinking when not connected
-    if (currentMillis - previousMillis >= 200) {
-      previousMillis = currentMillis;
-      ledState = !ledState;
-      digitalWrite(LED_BUILTIN, ledState);  // Will blink (inverted logic)
+    blinkInterval = DISCONNECTED_BLINK_INTERVAL;  // 250ms when disconnected
+  }
+  
+  // Blink the LED
+  if (currentMillis - previousBlink >= blinkInterval) {
+    previousBlink = currentMillis;
+    ledState = !ledState;
+    digitalWrite(LED_BUILTIN, !ledState);  // Inverted logic for built-in LED
+  }
+}
+
+// Check for WiFi reset button (BOOT button)
+void checkResetButton() {
+  // Read button state (LOW when pressed due to pull-up)
+  int buttonState = digitalRead(RESET_WIFI_BUTTON);
+  
+  if (buttonState == LOW) {  // Button is pressed
+    if (!buttonPressed) {
+      // Button just pressed - start timing
+      buttonPressed = true;
+      buttonPressTime = millis();
+      resetExecuted = false;  // Reset the execution flag
+      resetCountdown = 5;
+      Serial.println("\n🔴 BOOT button pressed!");
+      Serial.println("Hold for 5 seconds to reset WiFi...");
+    } 
+    else {
+      // Button is being held down
+      unsigned long holdTime = millis() - buttonPressTime;
+      
+      // Calculate seconds remaining
+      int secondsRemaining = 5 - (holdTime / 1000);
+      
+      // Update countdown display every second
+      if (secondsRemaining != resetCountdown && secondsRemaining > 0) {
+        resetCountdown = secondsRemaining;
+        Serial.print("⏱️  Hold for ");
+        Serial.print(resetCountdown);
+        Serial.println(" more seconds...");
+      }
+      
+      // Check if held for 5 seconds AND reset hasn't been executed yet
+      if (holdTime >= 5000 && !resetExecuted) {
+        resetExecuted = true;  // Set flag to prevent multiple executions
+        Serial.println("\n✅ 5 seconds reached! Resetting WiFi NOW!");
+        resetWiFiSettings();  // This will restart the ESP
+        // Note: Code after this won't execute because ESP restarts
+      }
+    }
+  } 
+  else {  // Button is released
+    if (buttonPressed) {
+      unsigned long holdTime = millis() - buttonPressTime;
+      
+      if (holdTime < 5000) {
+        Serial.print("👆 Button released after ");
+        Serial.print(holdTime / 1000.0, 1);
+        Serial.println(" seconds - No reset (need 5 seconds)");
+      }
+      
+      // Reset button variables
+      buttonPressed = false;
+      resetCountdown = 0;
     }
   }
 }
@@ -47,7 +135,19 @@ void setup() {
   // Initialize Serial
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n\nESP32-C3 Supermini WiFi Manager Demo");
+  
+  Serial.println("\n\n===================================");
+  Serial.println("ESP32-C3 Supermini WiFi Manager");
+  Serial.println("===================================");
+  Serial.println("\n📋 LED Status Indicators:");
+  Serial.println("  - Connected:    Blink 500ms");
+  Serial.println("  - Disconnected: Blink 250ms");
+  Serial.println("  - Reset mode:   Rapid blink during countdown");
+  Serial.println("\n🔧 WiFi Reset:");
+  Serial.println("  - Hold BOOT button (GPIO9) for 5 seconds");
+  Serial.println("  - LED will blink rapidly during countdown");
+  Serial.println("  - Device will restart in AP mode");
+  Serial.println("===================================\n");
   
   // Configure pins
   pinMode(LED_BUILTIN, OUTPUT);
@@ -56,40 +156,39 @@ void setup() {
   pinMode(BUTTON_BOOT, INPUT_PULLUP);
   
   // Start with LEDs OFF
-  digitalWrite(LED_BUILTIN, HIGH);   // OFF (inverted)
+  digitalWrite(LED_BUILTIN, HIGH);   // OFF
   digitalWrite(EXTERNAL_LED, LOW);   // OFF
   
-  Serial.println("Starting WiFi Manager...");
-  Serial.println("If WiFi doesn't connect in 10 seconds, AP mode will start");
-  
   // WiFi Manager configuration
-  wm.setConfigPortalTimeout(180);  // AP mode timeout (seconds)
-  wm.setConnectTimeout(10);        // Connection timeout
-  wm.setWiFiAutoReconnect(true);   // Auto reconnect
-  wm.setSaveParamsCallback([](){
-    Serial.println("WiFi credentials saved!");
+  wm.setConfigPortalTimeout(180);     // AP mode timeout
+  wm.setConnectTimeout(10);            // Connection timeout
+  wm.setWiFiAutoReconnect(true);       // Auto reconnect
+  wm.setCleanConnect(true);            // Clean connect
+  
+  // Set callback for when WiFi connects
+  wm.setSaveConfigCallback([](){
+    Serial.println("\n✅ WiFi credentials saved successfully!");
   });
   
-  // Set custom AP IP (optional)
-  // wm.setAPStaticIPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  // Try to connect to WiFi
+  Serial.println("📡 Connecting to WiFi...");
+  Serial.println("(If no saved credentials, AP mode will start)\n");
   
-  // Set custom menu items (optional)
-  std::vector<const char*> menu = {"wifi", "info", "restart", "exit"};
-  wm.setMenu(menu);
-  
-  // Try to connect to WiFi (will start AP mode if fails)
-  bool connected = wm.autoConnect("ESP32-C3-Supermini");  // AP name when not configured
+  bool connected = wm.autoConnect("ESP32-C3-Supermini");
   
   if (connected) {
-    Serial.println("WiFi Connected Successfully!");
-    Serial.print("SSID: ");
+    Serial.println("\n✅ WiFi Connected Successfully!");
+    Serial.print("   SSID: ");
     Serial.println(WiFi.SSID());
-    Serial.print("IP Address: ");
+    Serial.print("   IP Address: ");
     Serial.println(WiFi.localIP());
-    digitalWrite(EXTERNAL_LED, HIGH);  // Turn on external LED to indicate connection
+    Serial.print("   RSSI: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm\n");
   } else {
-    Serial.println("Failed to connect to WiFi. AP mode is running.");
-    Serial.println("Connect to 'ESP32-C3-Supermini' WiFi network to configure");
+    Serial.println("\n⚠️  Failed to connect to WiFi.");
+    Serial.println("   AP mode is running at 192.168.4.1");
+    Serial.println("   Connect to 'ESP32-C3-Supermini' to configure\n");
   }
 }
 
@@ -97,49 +196,34 @@ void loop() {
   // Handle WiFi Manager processes
   wm.process();
   
-  // Update status LED based on WiFi connection
+  // Update status LED
   updateStatusLED();
   
-  // Check for WiFi reset (hold BOOT button for 5 seconds)
-  static unsigned long buttonPressTime = 0;
-  static bool buttonPressed = false;
+  // Check for WiFi reset button
+  checkResetButton();
   
-  if (digitalRead(RESET_WIFI_BUTTON) == LOW) {
-    if (!buttonPressed) {
-      buttonPressed = true;
-      buttonPressTime = millis();
-      Serial.println("Button pressed - hold for 5 seconds to reset WiFi");
-    } else if (millis() - buttonPressTime > 5000) {
-      Serial.println("Button held for 5 seconds - Resetting WiFi...");
-      resetWiFiSettings();
-    }
-  } else {
-    if (buttonPressed && (millis() - buttonPressTime < 5000)) {
-      Serial.println("Button released - WiFi settings preserved");
-    }
-    buttonPressed = false;
-  }
-  
-  // Original button toggle functionality
-  int currentButtonState = digitalRead(EXTERNAL_BUTTON);
-  if (currentButtonState == LOW && lastButtonState == HIGH) {
+  // External button toggle functionality
+  int currentExternalButton = digitalRead(EXTERNAL_BUTTON);
+  if (currentExternalButton == LOW && lastExternalButtonState == HIGH) {
     delay(50); // Debounce
     digitalWrite(EXTERNAL_LED, !digitalRead(EXTERNAL_LED));
-    Serial.println("External button pressed - Toggling external LED");
+    Serial.println("🔘 External button pressed - Toggling external LED");
   }
-  lastButtonState = currentButtonState;
+  lastExternalButtonState = currentExternalButton;
   
-  // Print WiFi status periodically
+  // Print WiFi status periodically (less frequently)
   static unsigned long lastStatusPrint = 0;
   if (millis() - lastStatusPrint > 30000) {  // Every 30 seconds
     lastStatusPrint = millis();
+    
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("WiFi Connected - IP: ");
-      Serial.println(WiFi.localIP());
-    } else {
-      Serial.println("WiFi Disconnected - AP mode active");
+      Serial.print("📊 Connected - IP: ");
+      Serial.print(WiFi.localIP());
+      Serial.print(" | RSSI: ");
+      Serial.print(WiFi.RSSI());
+      Serial.println(" dBm");
     }
   }
   
-  delay(10);  // Small delay for stability
+  delay(10);
 }
