@@ -89,8 +89,8 @@ Need to connect to a different WiFi network? Hold the BOOT button:
 
 ### LED Patterns Configuration
 ```cpp
-#define CONNECTED_BLINK_INTERVAL 500      // 500ms ON / 500ms OFF
-#define DISCONNECTED_BLINK_INTERVAL 250   // 250ms ON / 250ms OFF
+#define CONNECTED_BLINK_INTERVAL 500      // 1000ms ON / 1000ms OFF
+#define DISCONNECTED_BLINK_INTERVAL 250   // 500ms ON / 500ms OFF
 #define AP_MODE_BLINK_ON 250               // 250ms ON in AP mode
 #define AP_MODE_BLINK_OFF 750              // 750ms OFF in AP mode
 #define RESET_BLINK_INTERVAL 100          // 100ms during reset
